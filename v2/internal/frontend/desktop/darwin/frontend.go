@@ -14,6 +14,7 @@ package darwin
 #include <stdlib.h>
 */
 import "C"
+
 import (
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"os"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v2/pkg/assetserver"
@@ -36,15 +38,16 @@ import (
 
 const startURL = "wails://wails/"
 
-var messageBuffer = make(chan string, 100)
-var requestBuffer = make(chan webview.Request, 100)
-var callbackBuffer = make(chan uint, 10)
-var openFilepathBuffer = make(chan string, 100)
-var openUrlBuffer = make(chan string, 100)
-var secondInstanceBuffer = make(chan options.SecondInstanceData, 1)
+var (
+	messageBuffer        = make(chan string, 100)
+	requestBuffer        = make(chan webview.Request, 100)
+	callbackBuffer       = make(chan uint, 10)
+	openFilepathBuffer   = make(chan string, 100)
+	openUrlBuffer        = make(chan string, 100)
+	secondInstanceBuffer = make(chan options.SecondInstanceData, 1)
+)
 
 type Frontend struct {
-
 	// Context
 	ctx context.Context
 
@@ -52,6 +55,9 @@ type Frontend struct {
 	logger          *logger.Logger
 	debug           bool
 	devtoolsEnabled bool
+
+	// Keep single instance lock file, so that it will not be GC and lock will exist while app is running
+	singleInstanceLockFile *os.File
 
 	// Assets
 	assets   *assetserver.AssetServer
@@ -153,6 +159,7 @@ func (f *Frontend) startRequestProcessor() {
 		f.assets.ServeWebViewRequest(request)
 	}
 }
+
 func (f *Frontend) startCallbackProcessor() {
 	for callback := range callbackBuffer {
 		err := f.handleCallback(callback)
@@ -171,26 +178,23 @@ func (f *Frontend) WindowReloadApp() {
 }
 
 func (f *Frontend) WindowSetSystemDefaultTheme() {
-	return
 }
 
 func (f *Frontend) WindowSetLightTheme() {
-	return
 }
 
 func (f *Frontend) WindowSetDarkTheme() {
-	return
 }
 
 func (f *Frontend) Run(ctx context.Context) error {
 	f.ctx = ctx
 
 	if f.frontendOptions.SingleInstanceLock != nil {
-		SetupSingleInstance(f.frontendOptions.SingleInstanceLock.UniqueId)
+		f.singleInstanceLockFile = SetupSingleInstance(f.frontendOptions.SingleInstanceLock.UniqueId)
 	}
 
-	var _debug = ctx.Value("debug")
-	var _devtoolsEnabled = ctx.Value("devtoolsEnabled")
+	_debug := ctx.Value("debug")
+	_devtoolsEnabled := ctx.Value("devtoolsEnabled")
 
 	if _debug != nil {
 		f.debug = _debug.(bool)
@@ -215,6 +219,7 @@ func (f *Frontend) Run(ctx context.Context) error {
 func (f *Frontend) WindowCenter() {
 	f.mainWindow.Center()
 }
+
 func (f *Frontend) WindowSetAlwaysOnTop(onTop bool) {
 	f.mainWindow.SetAlwaysOnTop(onTop)
 }
@@ -222,6 +227,7 @@ func (f *Frontend) WindowSetAlwaysOnTop(onTop bool) {
 func (f *Frontend) WindowSetPosition(x, y int) {
 	f.mainWindow.SetPosition(x, y)
 }
+
 func (f *Frontend) WindowGetPosition() (int, int) {
 	return f.mainWindow.GetPosition()
 }
@@ -253,6 +259,7 @@ func (f *Frontend) WindowShow() {
 func (f *Frontend) WindowHide() {
 	f.mainWindow.Hide()
 }
+
 func (f *Frontend) Show() {
 	f.mainWindow.ShowApplication()
 }
@@ -260,18 +267,23 @@ func (f *Frontend) Show() {
 func (f *Frontend) Hide() {
 	f.mainWindow.HideApplication()
 }
+
 func (f *Frontend) WindowMaximise() {
 	f.mainWindow.Maximise()
 }
+
 func (f *Frontend) WindowToggleMaximise() {
 	f.mainWindow.ToggleMaximise()
 }
+
 func (f *Frontend) WindowUnmaximise() {
 	f.mainWindow.UnMaximise()
 }
+
 func (f *Frontend) WindowMinimise() {
 	f.mainWindow.Minimise()
 }
+
 func (f *Frontend) WindowUnminimise() {
 	f.mainWindow.UnMinimise()
 }
@@ -279,6 +291,7 @@ func (f *Frontend) WindowUnminimise() {
 func (f *Frontend) WindowSetMinSize(width int, height int) {
 	f.mainWindow.SetMinSize(width, height)
 }
+
 func (f *Frontend) WindowSetMaxSize(width int, height int) {
 	f.mainWindow.SetMaxSize(width, height)
 }
@@ -345,7 +358,6 @@ func (f *Frontend) Notify(name string, data ...interface{}) {
 }
 
 func (f *Frontend) processMessage(message string) {
-
 	if message == "DomReady" {
 		if f.frontendOptions.OnDomReady != nil {
 			f.frontendOptions.OnDomReady(f.ctx)
@@ -356,6 +368,11 @@ func (f *Frontend) processMessage(message string) {
 	if message == "runtime:ready" {
 		cmd := fmt.Sprintf("window.wails.setCSSDragProperties('%s', '%s');", f.frontendOptions.CSSDragProperty, f.frontendOptions.CSSDragValue)
 		f.ExecJS(cmd)
+
+		if f.frontendOptions.DragAndDrop != nil && f.frontendOptions.DragAndDrop.EnableFileDrop {
+			f.ExecJS("window.wails.flags.enableWailsDragAndDrop = true;")
+		}
+
 		return
 	}
 
@@ -388,7 +405,6 @@ func (f *Frontend) processMessage(message string) {
 			f.logger.Info("Unknown message returned from dispatcher: %+v", result)
 		}
 	}()
-
 }
 
 func (f *Frontend) ProcessOpenFileEvent(filePath string) {
